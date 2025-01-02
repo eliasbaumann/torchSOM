@@ -37,7 +37,7 @@ class torchSOM(torch.nn.Module):
         n: int,
         niter: int,
         threshold: torch.tensor,
-        thresholdStep: float,
+        threshold_step: float,
         alpha_start: float,
         alpha_end: float,
         *args,
@@ -48,7 +48,7 @@ class torchSOM(torch.nn.Module):
         self.n = n
         self.niter = niter
         self.threshold = threshold
-        self.thresholdStep = thresholdStep
+        self.threshold_step = threshold_step
         self.alpha_start = alpha_start
         self.alpha_end = alpha_end
         self.rand_indices = torch.randint(0, n, size=[niter])
@@ -67,6 +67,11 @@ class torchSOM(torch.nn.Module):
         nhbrdist : torch.tensor
         k : int
             current step
+
+        Returns
+        -------
+        torch.tensor
+            updated SOM nodes
         """
         i = self.rand_indices[k]
         dist = eucl_dist(data[i], nodes)
@@ -80,7 +85,7 @@ class torchSOM(torch.nn.Module):
         tmp = data[i] - nodes[to_update]
         nodes[to_update] += tmp * alpha
         self.change += torch.abs(tmp).sum()
-        self.threshold += self.thresholdStep
+        self.threshold += self.threshold_step
         return nodes
 
 
@@ -95,11 +100,35 @@ def low_level_som(
     n: int,
     rlen: int,
 ):
+    """
+    Calculate the self-organizing map
+
+    Parameters
+    ----------
+    data : torch.tensor
+        input data
+    nodes : torch.tensor
+        updated SOM nodes
+    nhbrdist : torch.tensor
+    alpha_start, alpha_end : float
+        start and end learning rate
+    radius_start, radius_end : float
+        start and end radius
+    n : int
+        size of data (axis 0)
+    rlen : int
+        Number of times to loop over the training data for each MST
+
+    Returns
+    -------
+    torch.tensor
+        updated SOM nodes
+    """
 
     niter = rlen * n
     threshold = torch.tensor(radius_start)
-    thresholdStep = (radius_start - radius_end) / niter
-    som_module = torchSOM(n, niter, threshold, thresholdStep, alpha_start, alpha_end)
+    threshold_step = (radius_start - radius_end) / niter
+    som_module = torchSOM(n, niter, threshold, threshold_step, alpha_start, alpha_end)
     k = 0
 
     while k < niter:
@@ -114,20 +143,14 @@ def low_level_som(
 
 @torch.compile
 def neighborhood_distance(xdim: int, ydim: int):
-    # grid is basically list of all coordinates in neighborhood
-    #
-    # [19]: np.meshgrid(np.arange(1,3+1), np.arange(1,3+1))
-    # Out[19]:
-    # [array([[1, 2, 3],
-    #         [1, 2, 3],
-    #         [1, 2, 3]]),
-    #  array([[1, 1, 1],
-    #         [2, 2, 2],
-    #         [3, 3, 3]])]
+    """
+    Calculate the distance between each node in the grid
+    """
+
     grid = torch.cartesian_prod(torch.arange(1, xdim + 1), torch.arange(1, ydim + 1))[
         :, [1, 0]
     ].float()
-    # setting p=inf is the same as chebyshev distance, or Maximal distance
+
     return torch.cdist(grid, grid, p=torch.inf)
 
 
@@ -189,57 +212,29 @@ def som(
         # Let the radius have a sane default value based on the grid size
         radius_range = (torch.quantile(nhbrdist, q=0.67).item(), 0)
 
-    n_nodes = xdim * ydim
+    # n_nodes = xdim * ydim
     if nodes is None:
         # If we don't supply nodes, then initialize a seed and randomly sample xdim * ydim rows
         torch.manual_seed(seed)
-        # torch.randint(low=0,high=data.shape[0],size=)
         nodes = data[torch.randperm(data.shape[0])[: xdim * ydim]]
-        # nodes = data[np.random.choice(, xdim * ydim, replace=False), :]
 
-    # if not data.flags['F_CONTIGUOUS']:
-    #     data = np.asfortranarray(data)
-
-    # assert data.dtype == np.dtype("d")
-    # cdef double[::1,:] data_mv = data
     data_rows = data.shape[0]
     data_cols = data.shape[1]
 
-    # if not nodes.flags['F_CONTIGUOUS']:
-    #     nodes = np.asfortranarray(nodes)
-
-    # assert nodes.dtype == np.dtype("d")
-    # cdef double[::1,:] nodes_mv = nodes
     nodes_rows = nodes.shape[0]
     nodes_cols = nodes.shape[1]
-
-    # if not nhbrdist.flags['F_CONTIGUOUS']:
-    #     nhbrdist = np.asfortranarray(nhbrdist)
-
-    # assert nhbrdist.dtype == np.dtype("d")
-    # cdef double[::1,:] nhbrdist_mv = nhbrdist
-
-    if nodes_cols != data_cols:
-        raise Exception(
-            f"When passing nodes, it must have the same number of columns as the data, nodes has {nodes_cols} columns, data has {data_cols} columns"
-        )
-    if nodes_rows != xdim * ydim:
-        raise Exception(
-            f"When passing nodes, it must have the same number of rows as xdim * ydim. nodes has {nodes_rows} rows, xdim * ydim = {xdim * ydim}"
-        )
+    assert (
+        data_cols != nodes_cols
+    ), f"When passing nodes, it must have the same number of columns as the data, nodes has {nodes_cols} columns, data has {data_cols} columns"
+    assert (
+        data_rows != xdim * ydim
+    ), f"When passing nodes, it must have the same number of rows as xdim * ydim. nodes has {nodes_rows} rows, xdim * ydim = {xdim * ydim}"
 
     if importance is not None:
         # scale the data by the importance weights
         raise NotImplementedError("importance weights not implemented yet")
 
-    # xDists = torch.zeros((n_nodes), dtype=data.dtype)
-    # cdef double [:] xDists_mv = xDists
-
-    # if seed is not None:
-    #     C_SEED_RAND(seed)
-    # else:
-    #     C_SEED_RAND(np.random.randint(low=1, high=65535))
-
+    # Distance functions are currently not implemented except for euclidean
     nodes = low_level_som(
         data,
         nodes,
@@ -251,96 +246,8 @@ def som(
         data_rows,
         rlen,
     )
-    # C_SOM(
-    #     &data_mv[0, 0],
-    #     &nodes_mv[0, 0],
-    #     &nhbrdist_mv[0, 0],
-
-    #     alpha_range[0],
-    #     alpha_range[1],
-
-    #     radius_range[0],
-    #     radius_range[1],
-
-    #     &xDists_mv[0],
-
-    #     data_rows,
-    #     data_cols,
-
-    #     n_nodes,
-
-    #     rlen,
-    #     distf
-    #     )
 
     return nodes
-
-
-# def map_data_to_nodes(nodes, newdata, distf=2):
-#     """Assign nearest node to each obersevation in newdata
-
-#     Both nodes and newdata must represent the same parameters, in the same order.
-
-#     Parameters
-#     ----------
-#     nodes : np.typing.NDArray[np.dtype("d")]
-#         Nodes of the SOM.
-#         shape = (node_count, parameter_count)
-#         Fortan contiguous preffered
-#     newdata: np.typing.NDArray[np.dtype("d")]
-#         New observations to assign nodes.
-#         shape = (observation_count, parameter_count)
-#         Fortan contiguous preffered
-#     distf: int
-#         Distance function to use.
-#         1 = manhattan
-#         2 = euclidean
-#         3 = chebyshev
-#         4 = cosine
-
-#     Returns
-#     -------
-#     (np.typing.NDArray[dtype("i")], np.typing.NDArray[np.dtype("d")])
-#         The first array contains the node index assigned to each observation.
-#             shape = (observation_count,)
-#         The second array contains the distance to the node for each observation.
-#             shape = (observation_count,)
-
-#     """
-
-#     if not nodes.flags['F_CONTIGUOUS']:
-#         nodes = np.asfortranarray(nodes)
-#     cdef double[::1,:] nodes_mv = nodes
-#     nodes_rows = nodes.shape[0]
-#     nodes_cols = nodes.shape[1]
-
-#     if not newdata.flags['F_CONTIGUOUS']:
-#         newdata = np.asfortranarray(newdata)
-#     cdef double[::1,:] newdata_mv = newdata
-#     newdata_rows = newdata.shape[0]
-#     newdata_cols = newdata.shape[1]
-
-#     nnClusters = np.zeros(newdata_rows, dtype=np.dtype("i"))
-#     nnDists = np.zeros(newdata_rows, dtype=np.dtype("d"))
-#     cdef int [:] nnClusters_mv = nnClusters
-#     cdef double [:] nnDists_mv = nnDists
-
-#     C_mapDataToNodes(
-#         &newdata_mv[0, 0],
-#         &nodes_mv[0, 0],
-#         nodes_rows,
-#         newdata_rows,
-#         nodes_cols,
-#         &nnClusters_mv[0],
-#         &nnDists_mv[0],
-#         distf
-#         )
-
-#     return (nnClusters, nnDists)
-
-
-# from pyFlowSOM import map_data_to_nodes as pfsmap_data_to_nodes, som as pfssom
-# from som import som
 
 
 if __name__ == "__main__":
